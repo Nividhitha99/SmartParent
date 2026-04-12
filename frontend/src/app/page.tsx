@@ -2,23 +2,32 @@
 
 import { useState, useRef } from "react";
 import { uploadMenuImage, planFromText } from "@/lib/api";
-import type { PlanResponse, PlanStep } from "@/types/plan";
+import type { PlanResponse, PlanStep, Recipe } from "@/types/plan";
 import { WEEKDAYS, groupByDay, getWeekDates } from "@/lib/steps";
 
 export default function HomePage() {
   const [steps, setSteps] = useState<PlanStep[] | null>(null);
+  const [shoppingList, setShoppingList] = useState<string[]>([]);
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [textInput, setTextInput] = useState("");
 
+  function applyResponse(res: PlanResponse) {
+    setSteps(res.steps);
+    setShoppingList(res.shopping_list ?? []);
+    setRecipes(res.recipes ?? []);
+  }
+
   async function handleUpload(file: File) {
     setLoading(true);
     setError(null);
     setSteps(null);
+    setShoppingList([]);
+    setRecipes([]);
     try {
-      const res: PlanResponse = await uploadMenuImage(file);
-      setSteps(res.steps);
+      applyResponse(await uploadMenuImage(file));
     } catch (e: any) {
       setError(e?.message || "Upload failed");
     } finally {
@@ -31,9 +40,10 @@ export default function HomePage() {
     setLoading(true);
     setError(null);
     setSteps(null);
+    setShoppingList([]);
+    setRecipes([]);
     try {
-      const res: PlanResponse = await planFromText(textInput.trim());
-      setSteps(res.steps);
+      applyResponse(await planFromText(textInput.trim()));
     } catch (e: any) {
       setError(e?.message || "Request failed");
     } finally {
@@ -47,7 +57,7 @@ export default function HomePage() {
         <header className="mb-6">
           <h1 className="text-3xl font-semibold">SmartParent Planner</h1>
           <p className="text-gray-600 mt-1">
-            Upload a school menu image or paste OCR text. We’ll turn it into actionable steps.
+            Upload a school menu image or paste OCR text. We'll turn it into actionable steps.
           </p>
         </header>
 
@@ -73,7 +83,7 @@ export default function HomePage() {
                 {loading ? "Processing…" : "Upload Menu Image"}
               </button>
               <p className="mt-2 text-xs text-gray-500">
-                JPG/PNG. We’ll detect days & meals automatically.
+                JPG/PNG. We'll detect days & meals automatically.
               </p>
             </div>
 
@@ -105,32 +115,169 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Steps */}
-        <section className="mt-6">
-          {!steps && !loading && (
-            <p className="text-sm text-gray-500">
-              Your steps will appear here after you upload or submit text.
-            </p>
-          )}
-          {loading && (
-            <div className="animate-pulse space-y-3">
-              <div className="h-20 rounded-2xl bg-gray-200" />
-              <div className="h-20 rounded-2xl bg-gray-200" />
-              <div className="h-20 rounded-2xl bg-gray-200" />
-            </div>
-          )}
-          {steps && <StepsByDay steps={steps} />}
-        </section>
+        {/* Loading skeleton */}
+        {loading && (
+          <div className="mt-6 animate-pulse space-y-3">
+            <div className="h-20 rounded-2xl bg-gray-200" />
+            <div className="h-20 rounded-2xl bg-gray-200" />
+            <div className="h-20 rounded-2xl bg-gray-200" />
+          </div>
+        )}
+
+        {/* Results */}
+        {steps && !loading && (
+          <div className="mt-6 space-y-8">
+            {/* Weekly plan */}
+            <StepsByDay steps={steps} />
+
+            {/* Shopping list */}
+            {shoppingList.length > 0 && (
+              <ShoppingListCard items={shoppingList} />
+            )}
+
+            {/* Recipes */}
+            {recipes.length > 0 && (
+              <RecipesAccordion recipes={recipes} />
+            )}
+          </div>
+        )}
+
+        {!steps && !loading && (
+          <p className="mt-6 text-sm text-gray-500">
+            Your steps will appear here after you upload or submit text.
+          </p>
+        )}
       </div>
     </main>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Shopping List
+// ---------------------------------------------------------------------------
+
+function ShoppingListCard({ items }: { items: string[] }) {
+  const [checked, setChecked] = useState<Set<string>>(() => new Set());
+
+  function toggle(item: string) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      next.has(item) ? next.delete(item) : next.add(item);
+      return next;
+    });
+  }
+
+  const remaining = items.filter((i) => !checked.has(i)).length;
+
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Shopping List</h2>
+        <span className="rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700">
+          {remaining} / {items.length} remaining
+        </span>
+      </div>
+      <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {items.map((item) => (
+          <li key={item}>
+            <label className="flex cursor-pointer items-center gap-3 rounded-xl p-2 hover:bg-gray-50">
+              <input
+                type="checkbox"
+                checked={checked.has(item)}
+                onChange={() => toggle(item)}
+                className="h-4 w-4 rounded accent-blue-600"
+              />
+              <span
+                className={`text-sm ${
+                  checked.has(item) ? "text-gray-400 line-through" : "text-gray-800"
+                }`}
+              >
+                {item}
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recipes Accordion
+// ---------------------------------------------------------------------------
+
+function RecipesAccordion({ recipes }: { recipes: Recipe[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <h2 className="mb-3 text-lg font-semibold">Recipes</h2>
+      <div className="divide-y">
+        {recipes.map((r) => {
+          const isOpen = open === r.food;
+          return (
+            <div key={r.food}>
+              <button
+                onClick={() => setOpen(isOpen ? null : r.food)}
+                className="flex w-full items-center justify-between py-3 text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-gray-900">{r.food}</span>
+                  {r.prep_time_mins > 0 && (
+                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500">
+                      {r.prep_time_mins} min
+                    </span>
+                  )}
+                </div>
+                <span className="text-gray-400 text-sm">{isOpen ? "▲" : "▼"}</span>
+              </button>
+
+              {isOpen && (
+                <div className="pb-4 pl-1 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Ingredients
+                    </p>
+                    <ul className="space-y-1">
+                      {r.ingredients.map((ing, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                          <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+                          {ing}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Steps
+                    </p>
+                    <ol className="space-y-1.5">
+                      {r.steps.map((step, idx) => (
+                        <li key={idx} className="flex items-start gap-2 text-sm text-gray-700">
+                          <span className="shrink-0 font-semibold text-blue-600">{idx + 1}.</span>
+                          {step}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Weekly plan (unchanged)
+// ---------------------------------------------------------------------------
+
 function StepsByDay({ steps }: { steps: PlanStep[] }) {
   const [weekStart, setWeekStart] = useState(() => {
-    // default = this week’s Monday
     const d = new Date();
-    const day = d.getDay(); // 0=Sun … 6=Sat
+    const day = d.getDay();
     const diff = d.getDate() - day + (day === 0 ? -6 : 1);
     return new Date(d.setDate(diff));
   });

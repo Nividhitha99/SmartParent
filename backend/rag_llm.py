@@ -1,20 +1,18 @@
 import os, json
+import anthropic
 import chromadb
 from chromadb.utils import embedding_functions
-from openai import OpenAI
 
-# OpenAI client for embeddings + chat
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Anthropic client for chat completions
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # --- ChromaDB setup (persistent local vector DB) ---
+# DefaultEmbeddingFunction uses all-MiniLM-L6-v2 locally — no API key needed.
 chroma_client = chromadb.PersistentClient(path="rag_db")
 
 collection = chroma_client.get_or_create_collection(
     name="smartparent",
-    embedding_function=embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model_name="text-embedding-3-small"
-    )
+    embedding_function=embedding_functions.DefaultEmbeddingFunction()
 )
 
 def add_knowledge(docs: list[dict]):
@@ -45,15 +43,16 @@ def generate_plan_with_rag(user_prompt: str) -> dict:
             "Always return valid JSON with keys: title, category, ingredients (or items), steps."
         )
 
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system_msg,
             messages=[
-                {"role": "system", "content": system_msg},
                 {"role": "user", "content": f"Task: {user_prompt}\nRelevant docs:\n{retrieved_docs}"}
             ]
         )
 
-        content = resp.choices[0].message.content
+        content = resp.content[0].text
         return json.loads(content)
 
     except Exception as e:

@@ -10,3 +10,5 @@ db = client[MONGO_DB]
 # collections we’ll use
 jobs = db["jobs"]
 plans = db["plans"]
+tasks = db["tasks"]
+reminders = db["reminders"]
