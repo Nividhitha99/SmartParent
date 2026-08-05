@@ -2,32 +2,22 @@
 
 import { useState, useRef } from "react";
 import { uploadMenuImage, planFromText } from "@/lib/api";
-import type { PlanResponse, PlanStep, Recipe } from "@/types/plan";
+import type { PlanResponse, PlanStep, Recipe, Material, DailyPlanEntry, Solution, ActivityType } from "@/types/plan";
 import { WEEKDAYS, groupByDay, getWeekDates } from "@/lib/steps";
 
 export default function HomePage() {
-  const [steps, setSteps] = useState<PlanStep[] | null>(null);
-  const [shoppingList, setShoppingList] = useState<string[]>([]);
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [textInput, setTextInput] = useState("");
 
-  function applyResponse(res: PlanResponse) {
-    setSteps(res.steps);
-    setShoppingList(res.shopping_list ?? []);
-    setRecipes(res.recipes ?? []);
-  }
-
   async function handleUpload(file: File) {
     setLoading(true);
     setError(null);
-    setSteps(null);
-    setShoppingList([]);
-    setRecipes([]);
+    setPlan(null);
     try {
-      applyResponse(await uploadMenuImage(file));
+      setPlan(await uploadMenuImage(file));
     } catch (e: any) {
       setError(e?.message || "Upload failed");
     } finally {
@@ -39,11 +29,9 @@ export default function HomePage() {
     if (!textInput.trim()) return;
     setLoading(true);
     setError(null);
-    setSteps(null);
-    setShoppingList([]);
-    setRecipes([]);
+    setPlan(null);
     try {
-      applyResponse(await planFromText(textInput.trim()));
+      setPlan(await planFromText(textInput.trim()));
     } catch (e: any) {
       setError(e?.message || "Request failed");
     } finally {
@@ -55,9 +43,13 @@ export default function HomePage() {
     <main className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-4xl px-4 py-8">
         <header className="mb-6">
-          <h1 className="text-3xl font-semibold">SmartParent Planner</h1>
+          <h1 className="text-3xl font-semibold">SmartParent Activity</h1>
           <p className="text-gray-600 mt-1">
-            Upload a school menu image or paste OCR text. We'll turn it into actionable steps.
+            Upload a school circular photo, or paste any note — a food menu, homework,
+            a project, or competition prep. We'll figure out what it is and build the
+            right plan: a weekly grocery + recipe plan for food, or materials, solutions,
+            and a day-by-day plan for academic activities. Every activity you submit also
+            shows up on the To-Do List, in order of due date.
           </p>
         </header>
 
@@ -80,10 +72,10 @@ export default function HomePage() {
                 className="inline-flex items-center rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50"
                 disabled={loading}
               >
-                {loading ? "Processing…" : "Upload Menu Image"}
+                {loading ? "Processing…" : "Upload Circular Photo"}
               </button>
               <p className="mt-2 text-xs text-gray-500">
-                JPG/PNG. We'll detect days & meals automatically.
+                JPG/PNG — a menu, homework, or project note. We'll detect what it is automatically.
               </p>
             </div>
 
@@ -92,7 +84,7 @@ export default function HomePage() {
                 <textarea
                   value={textInput}
                   onChange={(e) => setTextInput(e.target.value)}
-                  placeholder="Or paste OCR text / circular note here…"
+                  placeholder="Or paste OCR text / circular note here (food menu, homework, project, competition prep…)"
                   className="h-24 w-full resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <button
@@ -125,26 +117,46 @@ export default function HomePage() {
         )}
 
         {/* Results */}
-        {steps && !loading && (
+        {plan && !loading && plan.kind === "activity" && (
           <div className="mt-6 space-y-8">
-            {/* Weekly plan */}
-            <StepsByDay steps={steps} />
-
-            {/* Shopping list */}
-            {shoppingList.length > 0 && (
-              <ShoppingListCard items={shoppingList} />
+            {plan.solutions.length > 0 && <SolutionsCard solutions={plan.solutions} />}
+            {plan.materials.length > 0 && <MaterialsCard materials={plan.materials} />}
+            {plan.daily_plan.length > 0 && (
+              <ActivityDailyPlan
+                title={plan.title}
+                activityType={plan.activity_type}
+                deadlineDate={plan.deadline_date}
+                dailyPlan={plan.daily_plan}
+              />
             )}
-
-            {/* Recipes */}
-            {recipes.length > 0 && (
-              <RecipesAccordion recipes={recipes} />
+            {plan.solutions.length === 0 && plan.materials.length === 0 && plan.daily_plan.length === 0 && (
+              <p className="text-sm text-gray-500">
+                Couldn't generate a plan for this activity — try adding more detail.
+              </p>
             )}
           </div>
         )}
 
-        {!steps && !loading && (
+        {plan && !loading && plan.kind !== "activity" && (
+          <div className="mt-6 space-y-8">
+            {/* Weekly plan */}
+            <StepsByDay steps={plan.steps} />
+
+            {/* Shopping list */}
+            {plan.shopping_list.length > 0 && (
+              <ShoppingListCard items={plan.shopping_list} />
+            )}
+
+            {/* Recipes */}
+            {plan.recipes.length > 0 && (
+              <RecipesAccordion recipes={plan.recipes} />
+            )}
+          </div>
+        )}
+
+        {!plan && !loading && (
           <p className="mt-6 text-sm text-gray-500">
-            Your steps will appear here after you upload or submit text.
+            Your plan will appear here after you upload or submit text.
           </p>
         )}
       </div>
@@ -377,5 +389,127 @@ function StepsList({ steps }: { steps: PlanStep[] }) {
         </li>
       ))}
     </ol>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Materials (for academic activities: projects, homework, competition prep)
+// ---------------------------------------------------------------------------
+
+function MaterialsCard({ materials }: { materials: Material[] }) {
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <h2 className="mb-3 text-lg font-semibold">Materials Needed</h2>
+      <ul className="space-y-2">
+        {materials.map((m) => (
+          <li
+            key={m.name}
+            className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-100 p-3"
+          >
+            <span className="text-sm font-medium text-gray-800">{m.name}</span>
+            <div className="flex gap-2">
+              <a
+                href={m.amazon_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
+              >
+                Buy on Amazon
+              </a>
+              <a
+                href={m.maps_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium hover:bg-gray-50"
+              >
+                Find Nearby Store
+              </a>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Solutions (worked answers for homework problems/questions)
+// ---------------------------------------------------------------------------
+
+function SolutionsCard({ solutions }: { solutions: Solution[] }) {
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <h2 className="mb-3 text-lg font-semibold">Solutions</h2>
+      <ol className="space-y-4">
+        {solutions.map((s, i) => (
+          <li key={i} className="rounded-xl border border-gray-100 p-4">
+            <p className="mb-1.5 text-sm font-semibold text-gray-900">
+              {i + 1}. {s.question}
+            </p>
+            <p className="whitespace-pre-line text-sm text-gray-700">{s.solution}</p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Day-by-day activity plan
+// ---------------------------------------------------------------------------
+
+const ACTIVITY_TYPE_LABELS: Record<string, string> = {
+  assignment: "Assignment",
+  project: "Project",
+  prep: "Test/Competition Prep",
+};
+
+function ActivityDailyPlan({
+  title,
+  activityType,
+  deadlineDate,
+  dailyPlan,
+}: {
+  title: string | null;
+  activityType: ActivityType;
+  deadlineDate: string | null;
+  dailyPlan: DailyPlanEntry[];
+}) {
+  return (
+    <section className="rounded-2xl border bg-white p-5 shadow-sm">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">{title || "Activity"} — Day-by-Day Plan</h2>
+          {activityType && ACTIVITY_TYPE_LABELS[activityType] && (
+            <span className="rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700">
+              {ACTIVITY_TYPE_LABELS[activityType]}
+            </span>
+          )}
+        </div>
+        {deadlineDate && (
+          <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+            Due {deadlineDate}
+          </span>
+        )}
+      </div>
+      <ol className="space-y-4">
+        {dailyPlan.map((d, i) => (
+          <li key={i} className="rounded-xl border border-gray-100 p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+                {i + 1}
+              </span>
+              <span className="text-sm font-semibold text-gray-900">{d.day_label}</span>
+              {d.date && <span className="text-xs text-gray-500">({d.date})</span>}
+            </div>
+            <ul className="ml-9 list-disc space-y-1 text-sm text-gray-700">
+              {d.tasks.map((t, ti) => (
+                <li key={ti}>{t}</li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }

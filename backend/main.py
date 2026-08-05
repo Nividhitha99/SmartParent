@@ -14,10 +14,17 @@ from rag_llm import generate_plan_with_rag
 from db import plans, tasks, reminders
 import uuid
 import datetime
-from nlp_parser import parse_menu_image, parse_text_to_tasks, build_plan_from_menu, build_plan
+from nlp_parser import (
+    parse_menu_image, parse_text_to_tasks, build_plan_from_menu, build_plan,
+    build_step, build_supply_dress_event_steps, _when_string, ocr_full_text,
+)
 from kafka_producer import publish_plan_event
 from recipe_service import generate_recipes
 from kafka_consumer import start_consumer, create_reminder_from_task
+from project_planner import (
+    classify_circular, generate_activity_plan, generate_food_items,
+    classify_circular_image, generate_activity_plan_from_image,
+)
 
 
 @asynccontextmanager
@@ -65,6 +72,16 @@ def _build_shopping_list(steps: list) -> list[str]:
                 shopping.append(item)
     return shopping
 
+
+def _finalize_plan(plan: dict) -> dict:
+    """Stamp a plan with an id/timestamp/done flag before persisting — used so the
+    To-Do list (fed by these same persisted plans) can identify, sort, and
+    check off each one."""
+    plan["plan_id"] = str(uuid.uuid4())
+    plan["created_at"] = datetime.datetime.utcnow().isoformat()
+    plan["done"] = False
+    return plan
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -72,40 +89,215 @@ async def health():
 @app.post("/plan-to-upload")
 async def plan_to_upload(file: UploadFile = File(...)):
     """
-    Upload a weekly menu IMAGE (e.g., JPEG/PNG).
-    Returns per-day steps, a deduplicated shopping list, and short recipes for each food.
+    Upload a photo of a circular/note — a food menu, homework/assignment,
+    project, or other school note. Classifies the image directly via vision
+    (not lossy OCR, which mangles math notation and diagrams) and builds the
+    appropriate plan, same as /plan-from-text:
+      - food: per-day buy/pack steps, a deduplicated shopping list, and recipes.
+      - activity: materials (with purchase links), a day-by-day task plan, and
+        worked solutions for any concrete homework problems/questions shown.
+      - other: generic steps/reminders (events, dress code, supply runs).
     """
     content = await file.read()
-    menu = parse_menu_image(content)
-    plan = build_plan_from_menu(menu)
+    media_type = file.content_type or "image/jpeg"
+    kind = classify_circular_image(content, media_type)
 
-    shopping_list = _build_shopping_list(plan["steps"])
-    recipes = generate_recipes(shopping_list)
+    if kind == "activity":
+        activity = generate_activity_plan_from_image(content, media_type)
+        plan = {
+            "kind": "activity",
+            "raw_text": "",
+            "steps": [],
+            "shopping_list": [],
+            "recipes": [],
+            "activity_type": activity["activity_type"],
+            "title": activity["title"],
+            "deadline_date": activity["deadline_date"],
+            "materials": activity["materials"],
+            "daily_plan": activity["daily_plan"],
+            "solutions": activity["solutions"],
+        }
 
-    plan["shopping_list"] = shopping_list
-    plan["recipes"] = recipes
+    elif kind == "other":
+        parsed = parse_text_to_tasks(ocr_full_text(content))
+        plan = build_plan(parsed)
+        plan["kind"] = "other"
+        plan["shopping_list"] = []
+        plan["recipes"] = []
+        plan["activity_type"] = None
+        plan["title"] = None
+        plan["deadline_date"] = None
+        plan["materials"] = []
+        plan["daily_plan"] = []
+        plan["solutions"] = []
+
+    else:  # "food" — grid-based menu OCR, tuned for weekly menu tables
+        menu = parse_menu_image(content)
+        plan = build_plan_from_menu(menu)
+
+        shopping_list = _build_shopping_list(plan["steps"])
+        recipes = generate_recipes(shopping_list)
+
+        plan["kind"] = "food"
+        plan["shopping_list"] = shopping_list
+        plan["recipes"] = recipes
+        plan["activity_type"] = None
+        plan["title"] = None
+        plan["deadline_date"] = None
+        plan["materials"] = []
+        plan["daily_plan"] = []
+        plan["solutions"] = []
+
+    plan = _finalize_plan(plan)
+    await plans.insert_one(plan.copy())
+    publish_plan_event(plan)
+
     return JSONResponse(plan)
 
 @app.post("/plan-from-text")
 async def plan_from_text(text: str = Form(...)):
     """
-    Post raw OCR text or a circular note.
-    Returns steps, a deduplicated shopping list, and short recipes for each food.
+    Post raw OCR text or a circular note. First classifies the note as a food
+    menu, an academic activity (project/homework/assignment/competition prep),
+    or other, then builds the appropriate plan:
+      - food: per-day buy/pack steps, a deduplicated shopping list, and recipes.
+      - activity: materials (with purchase links) and a day-by-day task plan
+        spread across the days leading up to the deadline.
+      - other: generic steps/reminders (events, dress code, supply runs).
     Saves plan to MongoDB and publishes a Kafka event.
     """
-    parsed = parse_text_to_tasks(text)
-    plan = build_plan(parsed)
+    kind = classify_circular(text)
 
-    shopping_list = _build_shopping_list(plan["steps"])
-    recipes = generate_recipes(shopping_list)
+    if kind == "activity":
+        activity = generate_activity_plan(text)
+        plan = {
+            "kind": "activity",
+            "raw_text": text,
+            "steps": [],
+            "shopping_list": [],
+            "recipes": [],
+            "activity_type": activity["activity_type"],
+            "title": activity["title"],
+            "deadline_date": activity["deadline_date"],
+            "materials": activity["materials"],
+            "daily_plan": activity["daily_plan"],
+            "solutions": activity["solutions"],
+        }
 
-    plan["shopping_list"] = shopping_list
-    plan["recipes"] = recipes
+    elif kind == "food":
+        # Non-food signals (supplies/dress code/events) still come from the
+        # regex-based parser; food items come from the LLM, which handles
+        # freeform phrasing (e.g. bare "pasta") that a fixed keyword list misses,
+        # and can group items by day/meal when the note covers more than one day.
+        parsed = parse_text_to_tasks(text)
+        when = _when_string(parsed)
+        food_items = generate_food_items(text)
 
+        steps: list = []
+        if food_items:
+            for entry in food_items:
+                day = entry.get("day")
+                meal = entry.get("meal")
+                items = entry["items"]
+                label = " – ".join([b for b in [day, meal] if b]) or (when or "the day")
+                step_when = day or when
+                steps.append(build_step("buy", f"Buy items for {label}", items, step_when, "grocery store near me"))
+                steps.append(build_step("pack", f"Prepare/pack for {label}", items, step_when, "grocery store near me"))
+        elif parsed.foods:
+            # Fallback if the LLM call errored out — keyword-based extraction.
+            steps.append(build_step("buy", f"Buy items for {when or 'the day'} – Lunch/Snack", parsed.foods, when, "grocery store near me"))
+            steps.append(build_step("pack", f"Prepare/pack for {when or 'the day'} – Lunch/Snack", parsed.foods, when, "grocery store near me"))
+
+        steps.extend(build_supply_dress_event_steps(parsed, when))
+
+        if not steps:
+            steps.append(build_step("reminder", "Review the note and add tasks (no food/supplies detected)", [], when, None))
+
+        steps.append(build_step("reminder", "Set pickup/drop plan (consider carpool; check daycare/after-school if needed)", [], when, "daycare near me"))
+
+        shopping_list = _build_shopping_list(steps)
+        recipes = generate_recipes(shopping_list) if shopping_list else []
+
+        plan = {
+            "kind": "food",
+            "raw_text": text,
+            "steps": steps,
+            "shopping_list": shopping_list,
+            "recipes": recipes,
+            "activity_type": None,
+            "title": None,
+            "deadline_date": None,
+            "materials": [],
+            "daily_plan": [],
+            "solutions": [],
+        }
+
+    else:
+        parsed = parse_text_to_tasks(text)
+        plan = build_plan(parsed)
+
+        plan["kind"] = "other"
+        plan["shopping_list"] = []
+        plan["recipes"] = []
+        plan["activity_type"] = None
+        plan["title"] = None
+        plan["deadline_date"] = None
+        plan["materials"] = []
+        plan["daily_plan"] = []
+        plan["solutions"] = []
+
+    plan = _finalize_plan(plan)
     await plans.insert_one(plan.copy())
     publish_plan_event(plan)
 
     return JSONResponse(plan)
+
+
+# ---------------------------------------------------------------------------
+# To-Do List — read-only view over persisted 'activity' plans (assignments,
+# projects, competition/exam prep), sorted by due date. Every activity entered
+# via /plan-from-text or /plan-to-upload shows up here automatically — there
+# is no separate manual-entry path, so this can never drift out of sync with
+# what was actually submitted.
+# ---------------------------------------------------------------------------
+
+def _todo_sort_key(doc: dict):
+    deadline = doc.get("deadline_date")
+    return (deadline is None, deadline or "")
+
+
+@app.get("/todo")
+async def get_todo():
+    """Return all persisted activity plans, soonest deadline first (undated last)."""
+    cursor = plans.find({"kind": "activity", "plan_id": {"$exists": True}})
+    docs = await cursor.to_list(length=500)
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    docs.sort(key=_todo_sort_key)
+    return docs
+
+
+@app.patch("/todo/{plan_id}/done")
+async def toggle_todo_done(plan_id: str):
+    """Flip the done flag on an activity plan."""
+    doc = await plans.find_one({"plan_id": plan_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    new_done = not doc.get("done", False)
+    await plans.update_one({"plan_id": plan_id}, {"$set": {"done": new_done}})
+    doc["done"] = new_done
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+@app.delete("/todo/{plan_id}")
+async def delete_todo(plan_id: str):
+    """Permanently remove an activity plan from the to-do list."""
+    result = await plans.delete_one({"plan_id": plan_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    return {"deleted": plan_id}
+
 
 @app.post("/llm-plan")
 async def llm_plan(note: str = Body(..., embed=True)):

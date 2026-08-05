@@ -41,6 +41,13 @@ def _process_plan(plan: dict, loop: asyncio.AbstractEventLoop) -> None:
     """
     from db import reminders  # import here to avoid circular import at module load
 
+    async def _insert(doc: dict) -> None:
+        # Motor's insert_one() must be both called AND awaited on the loop it's
+        # bound to — evaluating it here (inside a plain coroutine function) means
+        # only this coroutine gets handed to run_coroutine_threadsafe, so Motor
+        # never sees the call happen on a thread with no running event loop.
+        await reminders.insert_one(doc)
+
     steps = plan.get("steps", [])
     for step in steps:
         if step.get("type") != "reminder":
@@ -54,9 +61,7 @@ def _process_plan(plan: dict, loop: asyncio.AbstractEventLoop) -> None:
         )
 
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                reminders.insert_one(doc), loop
-            )
+            future = asyncio.run_coroutine_threadsafe(_insert(doc), loop)
             future.result(timeout=5)
         except Exception as e:
             logger.error(f"[kafka_consumer] Failed to write reminder to MongoDB: {e}")
@@ -102,7 +107,12 @@ def _run_consumer(loop: asyncio.AbstractEventLoop) -> None:
                 code = msg.error().code()
                 if code == KafkaError._PARTITION_EOF:
                     continue
-                # Any real broker error — log and exit thread cleanly
+                if code == KafkaError.UNKNOWN_TOPIC_OR_PART:
+                    # plans-topic doesn't exist yet — it's auto-created on the
+                    # broker the first time a plan is published. Keep polling
+                    # instead of killing the thread; it'll pick up once created.
+                    continue
+                # Any other real broker error — log and exit thread cleanly
                 logger.error(f"[kafka_consumer] Kafka error: {msg.error()} — stopping consumer thread")
                 break
 
@@ -130,6 +140,11 @@ def start_consumer(loop: asyncio.AbstractEventLoop) -> None:
     Spin up the Kafka consumer in a daemon thread.
     Safe to call at FastAPI startup — will not raise even if Kafka is down.
     """
+    import os
+    if os.getenv("KAFKA_ENABLED", "true").lower() == "false":
+        logger.info("[kafka_consumer] KAFKA_ENABLED=false — skipping consumer thread")
+        return
+
     global _consumer_thread
     _consumer_thread = threading.Thread(
         target=_run_consumer,

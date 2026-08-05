@@ -364,6 +364,12 @@ def _fallback_per_day_from_fulltext(text: str) -> Dict[str, Dict[str, List[str]]
 
 # ------------------------------
 
+def ocr_full_text(image_bytes: bytes) -> str:
+    """Plain full-image OCR (no grid parsing) — used for non-menu circular images."""
+    img_rgb = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return _normalize_ocr_text(pytesseract.image_to_string(img_rgb))
+
+
 def parse_menu_image(image_bytes: bytes) -> ParsedMenu:
     """Parse a weekly menu image into per-day {meal → items} using grid cell OCR.
        If grid yields nothing, reconstruct per-day/meal from full OCR text.
@@ -542,6 +548,49 @@ def build_plan_from_menu(menu: ParsedMenu) -> Dict:
     steps.append(build_step("reminder", "Set pickup/drop plan", [], None, "daycare near me"))
     return {"steps": steps, "raw_text": menu.raw_text}
 
+def build_supply_dress_event_steps(parsed: ParsedNote, when: Optional[str]) -> List[Dict]:
+    """Build steps for supplies, dress code, and events — shared by build_plan()
+    and any caller (e.g. the food-note branch in main.py) that builds its own
+    food steps separately and still needs these non-food signals covered."""
+    steps: List[Dict] = []
+
+    if parsed.supplies:
+        steps.append(build_step(
+            "buy",
+            f"Buy school supplies for {when or 'the day'}",
+            parsed.supplies,
+            when,
+            place_query="stationery store near me"
+        ))
+        steps.append(build_step(
+            "pack",
+            f"Pack supplies: {', '.join(parsed.supplies)}",
+            parsed.supplies,
+            when,
+            place_query=None
+        ))
+
+    if parsed.dress_code:
+        steps.append(build_step(
+            "prepare",
+            f"Prepare dress code for {when or 'the day'}",
+            [parsed.dress_code],
+            when,
+            place_query="uniform store near me"
+        ))
+
+    if parsed.event:
+        steps.append(build_step(
+            "reminder",
+            f"Event: {parsed.event} scheduled",
+            [],
+            when,
+            place_query=None
+        ))
+
+    return steps
+
+
 def build_plan(parsed: ParsedNote) -> dict:
     steps: list[dict] = []
     when = _when_string(parsed)
@@ -563,42 +612,8 @@ def build_plan(parsed: ParsedNote) -> dict:
             place_query="grocery store near me"
         ))
 
-    # ---------------- SUPPLIES ----------------
-    if parsed.supplies:
-        steps.append(build_step(
-            "buy",
-            f"Buy school supplies for {when or 'the day'}",
-            parsed.supplies,
-            when,
-            place_query="stationery store near me"
-        ))
-        steps.append(build_step(
-            "pack",
-            f"Pack supplies: {', '.join(parsed.supplies)}",
-            parsed.supplies,
-            when,
-            place_query=None
-        ))
-
-    # ---------------- DRESS CODE ----------------
-    if parsed.dress_code:
-        steps.append(build_step(
-            "prepare",
-            f"Prepare dress code for {when or 'the day'}",
-            [parsed.dress_code],
-            when,
-            place_query="uniform store near me"
-        ))
-
-    # ---------------- EVENTS ----------------
-    if parsed.event:
-        steps.append(build_step(
-            "reminder",
-            f"Event: {parsed.event} scheduled",
-            [],
-            when,
-            place_query=None
-        ))
+    # ---------------- SUPPLIES / DRESS CODE / EVENTS ----------------
+    steps.extend(build_supply_dress_event_steps(parsed, when))
 
     # ---------------- DEFAULT FALLBACK ----------------
     if not steps:

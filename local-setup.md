@@ -131,9 +131,23 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
 
 ## 5 — Kafka (optional)
 
-Kafka is used to stream plan events to the reminders pipeline. It is **fully optional** — the app uses a dual-write strategy so reminders created from tasks are written directly to MongoDB. If Kafka is not running, the consumer thread logs a warning and exits; everything else continues normally.
+Kafka is used to stream plan-created events to the reminders pipeline (a plan's
+`reminder`-type steps get turned into entries in the bell dropdown). It is
+**fully optional** — the Tasks feature uses a dual-write strategy so those
+reminders are written directly to MongoDB regardless. If Kafka is not running,
+the consumer thread logs a warning and exits; everything else continues
+normally. Set `KAFKA_ENABLED=false` in `backend/.env` to skip it entirely.
 
-To run Kafka locally if you want the full pipeline:
+### Option A: Docker (recommended)
+
+A single-node broker in KRaft mode (no separate ZooKeeper needed) is defined
+in the repo's `docker-compose.yml`:
+
+```bash
+docker compose up -d
+```
+
+### Option B: Manual binary
 
 ```bash
 # Download from https://kafka.apache.org/downloads (binary, latest stable)
@@ -146,7 +160,9 @@ bin/zookeeper-server-start.sh config/zookeeper.properties
 bin/kafka-server-start.sh config/server.properties
 ```
 
-Kafka broker address used by the app: `localhost:9092`
+Kafka broker address used by the app: `localhost:9092`. The `plans-topic` topic
+is created automatically the first time a plan is published — no manual setup
+needed.
 
 ---
 

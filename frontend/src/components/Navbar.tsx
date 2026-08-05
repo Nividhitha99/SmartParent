@@ -7,8 +7,8 @@ import { getReminders, dismissReminder } from "@/lib/remindersApi";
 import type { Reminder } from "@/types/plan";
 
 const NAV_LINKS = [
-  { href: "/", label: "Planner" },
-  { href: "/tasks", label: "Tasks" },
+  { href: "/", label: "Activity" },
+  { href: "/todo", label: "To-Do List" },
 ];
 
 const POLL_INTERVAL_MS = 30_000;
