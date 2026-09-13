@@ -138,3 +138,21 @@ Not required. If unavailable, the consumer thread exits gracefully and reminders
 | `http://localhost:3000` | Planner — upload menu image or paste text |
 | `http://localhost:3000/tasks` | Homework & task board |
 | `http://localhost:8001/docs` | FastAPI Swagger UI |
+
+## LangGraph text-planning agents
+
+`POST /plan-from-text` now runs a bounded LangGraph `StateGraph`: a Claude-backed supervisor classifies the note, conditional edges select the food or activity AI agent (or the deterministic general-note specialist), and a validation node checks the plan envelope before persistence. Specialists reuse the existing Claude/NLP planning tools. This is a routed agent workflow, not an autonomous tool-calling loop.
+
+The endpoint runs synchronous planning in Starlette's worker thread pool so those calls do not block the async event loop. MongoDB persistence and the existing Kafka publication remain outside the graph and run once after successful generation. Requests have separate graph state; no shared conversational memory or checkpoint store is enabled. Notes must contain 1–20000 characters. Invalid generated envelopes produce HTTP 502 before persistence. Existing provider helpers retain their fallback behavior; structural validation does not verify factual accuracy.
+
+Image planning and the separate ChromaDB RAG endpoints are unchanged. This change does not add cloud deployment, distributed graph execution, durable Kafka delivery guarantees, or measured throughput improvements.
+
+Install the updated backend requirements, then run the isolated graph and endpoint tests (no API key or database required):
+
+```bash
+cd backend
+python -m unittest discover -s tests -v
+```
+
+The tests use real LangGraph execution with mocked planning/provider services; endpoint tests isolate the route from external startup services. A live end-to-end check still requires the application's existing Claude, MongoDB, OCR, and optional Kafka setup.
+
